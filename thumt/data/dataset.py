@@ -95,7 +95,7 @@ def get_training_input(filenames, params):
     """
 
     with tf.device("/cpu:0"):
-        def parse_fn(line_words, line_tags):
+        def parse_fn(line_words, line_tags, idx):
             # Encode in Bytes for TF
             words = [w.encode() for w in line_words.strip().split()] + ["<eos>".encode()]
             tags = [t.encode() for t in line_tags.strip().split()] + ["<eos>".encode()]
@@ -108,19 +108,19 @@ def get_training_input(filenames, params):
             chars.append(["<eos>".encode()])
             char_lengths = [len(c) for c in chars]
             chars = [c + [params.pad.encode()] * (max(char_lengths) - l) for c, l in zip(chars, char_lengths)]
-            return (words, chars, char_lengths), tags
+            return (words, chars, char_lengths, idx), tags
 
 
         def generator_fn(words, tags):
             with Path(words).open('r') as f_words, Path(tags).open('r') as f_tags:
-                for line_words, line_tags in zip(f_words, f_tags):
-                    yield parse_fn(line_words, line_tags)
+                for idx, (line_words, line_tags) in enumerate(zip(f_words, f_tags)):
+                    yield parse_fn(line_words, line_tags, idx)
         
 
-        shapes = (([None], [None, None], [None]), # words, chars, char_lengths
+        shapes = (([None], [None, None], [None], []), # words, chars, char_lengths, sentence index
                   [None])                         # tags              
 
-        types = ((tf.string, tf.string, tf.int32),
+        types = ((tf.string, tf.string, tf.int32, tf.int32),
                  tf.string)
 
         dataset = tf.data.Dataset.from_generator(
@@ -132,6 +132,7 @@ def get_training_input(filenames, params):
             output_shapes=shapes,
             output_types=types
         )
+
         dataset = dataset.shuffle(params.buffer_size)
         dataset = dataset.repeat() # ??? how much times
 
@@ -144,6 +145,7 @@ def get_training_input(filenames, params):
                 "source_length": tf.shape(src[0]),
                 "target_length": tf.shape(tgt),
                 "char_length": src[2],
+                "idx": src[3],
             },
             num_parallel_calls=params.num_threads
         )
@@ -188,6 +190,7 @@ def get_training_input(filenames, params):
         # Removes dimensions of size 1 from the shape of a tensor
         features["source_length"] = tf.squeeze(features["source_length"], 1)
         features["target_length"] = tf.squeeze(features["target_length"], 1)
+        # features["idx"] = 
 
         return features
 

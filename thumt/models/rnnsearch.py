@@ -402,6 +402,9 @@ def model_graph(features, labels, params):
         )
     )
 
+    # with tf.variable_scope("ignoring_ffn"):
+    #     ignoring_weights = tf.get_variable("ignoring_weights", shape=features[])
+
     loss = tf.reduce_sum(ce * tgt_mask) / tf.reduce_sum(tgt_mask)
 
     return loss

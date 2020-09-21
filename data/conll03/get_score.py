@@ -38,8 +38,8 @@ def main(args):
                 res_f.write(new_line)
             res_f.write("\n")
 
-    print(green("Generate {} bad datas when evaluate {}".format(bad_pred_num, args.predict_file)))
-    os.system("./conlleval.pl < {}".format(args.result_file))
+    print("Generate {} bad datas when evaluate {}".format(bad_pred_num, args.predict_file))
+    os.system("/mnt/NER/GCDT/data/conll03/conllevel.pl < {}".format(args.result_file))
     os.remove(args.result_file)    
 
 

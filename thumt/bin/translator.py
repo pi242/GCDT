@@ -275,19 +275,21 @@ def main(args):
                 results.append(sess.run(predictions))
                 message = "Finished batch %d" % len(results)
                 tf.logging.log(tf.logging.INFO, message)
-
+        
+        print(f'all batched done')
         # Convert to plain text
         vocab = params.vocabulary["target"]
         outputs = []
-
+        print(f'vocab computed')
         for result in results:
             outputs.append(result.tolist())
 
         outputs = list(itertools.chain(*outputs))
 
         #restored_outputs = []
-
+        # print(f'outputs = {outputs}')
         # Write to file
+        print(f'output file = {args.output}')
         with open(args.output, "w") as outfile:
             for output in outputs:
                 decoded = []
@@ -300,6 +302,7 @@ def main(args):
 
                 decoded = " ".join(decoded)
                 outfile.write("%s\n" % decoded)
+        print(f'translator.py done!!')
 
 
 if __name__ == "__main__":

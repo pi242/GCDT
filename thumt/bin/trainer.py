@@ -329,9 +329,10 @@ def main(args):
             features = record.get_input_features(  # ??? 
                 os.path.join(params.record, "*train*"), "train", params
             )
-
+        # print(f'features = {features["idx"]}')
         # Build model
         initializer = get_initializer(params)
+        print(f'params to model_cls = {params}')
         model = model_cls(params)
 
         # Multi-GPU setting
@@ -456,10 +457,10 @@ def main(args):
                 )
             )
         '''
-
         with tf.train.MonitoredTrainingSession(
                 checkpoint_dir=params.output, hooks=train_hooks,
                 save_checkpoint_secs=None, config=config) as sess:
+            print(sess.run(features))
             while not sess.should_stop():
                 utils.session_run(sess, zero_op)
                 for i in range(1, params.update_cycle):
