@@ -214,7 +214,7 @@ def _decoder(cell, inputs, memory, sequence_length, initial_state, dtype=None,
     return result
 
 
-def model_graph(features, labels, params):
+def model_graph(features, labels, params, use_ignoring_weights):
     src_vocab_size = len(params.vocabulary["source"])
     tgt_vocab_size = len(params.vocabulary["target"])
     char_vocab_size = len(params.vocabulary["char"])
@@ -395,15 +395,20 @@ def model_graph(features, labels, params):
     )
 
     ce = tf.reshape(ce, tf.shape(labels))
+    # print(f'\n\n\n\nlabels shape = {tf.shape(labels)}')
     tgt_mask = tf.to_float(
         tf.sequence_mask(
             features["target_length"],
             maxlen=tf.shape(features["target"])[1]
         )
     )
-
-    # with tf.variable_scope("ignoring_ffn"):
-    #     ignoring_weights = tf.get_variable("ignoring_weights", shape=features[])
+    
+    if use_ignoring_weights:
+        with tf.variable_scope("ignoring_ffn"):
+            ignoring_weights = tf.get_variable("ignoring_weights", shape=(14987, 1))
+            new_weights = tf.gather(ignoring_weights, features['sentence_idx'])
+            new_weights = tf.broadcast_to(new_weights, tf.shape(labels))
+            ce = tf.multiply(ce, new_weights)
 
     loss = tf.reduce_sum(ce * tgt_mask) / tf.reduce_sum(tgt_mask)
 
@@ -415,15 +420,26 @@ class RNNsearch(interface.NMTModel):
         super(RNNsearch, self).__init__(params=params, scope=scope)
 
     def get_training_func(self, initializer):
-        def training_fn(features, params=None):
+        def fn(features, params=None):
             if params is None:
                 params = self.parameters
             with tf.variable_scope(self._scope, initializer=initializer,
                                    reuse=tf.AUTO_REUSE):
-                loss = model_graph(features, features["target"], params)
+                loss = model_graph(features, features["target"], params, use_ignoring_weights=True)
                 return loss
 
-        return training_fn
+        return fn
+
+    def get_validation_func(self, initializer):
+        def fn(features, params=None):
+            if params is None:
+                params = self.parameters
+            with tf.variable_scope(self._scope, initializer=initializer,
+                                   reuse=tf.AUTO_REUSE):
+                loss = model_graph(features, features["target"], params, use_ignoring_weights=False)
+                return loss
+
+        return fn
 
     def get_evaluation_func(self):
         def evaluation_fn(features, params=None):

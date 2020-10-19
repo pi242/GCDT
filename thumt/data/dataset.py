@@ -110,28 +110,43 @@ def get_training_input(filenames, params):
             chars = [c + [params.pad.encode()] * (max(char_lengths) - l) for c, l in zip(chars, char_lengths)]
             return (words, chars, char_lengths, idx), tags
 
-
-        def generator_fn(words, tags):
-            with Path(words).open('r') as f_words, Path(tags).open('r') as f_tags:
-                for idx, (line_words, line_tags) in enumerate(zip(f_words, f_tags)):
-                    yield parse_fn(line_words, line_tags, idx)
+        class generator_wrapper():
+            def __init__(self):
+                self.sentence_num = 0
+            def generator_fn(self, words, tags):
+                with Path(words).open('r') as f_words, Path(tags).open('r') as f_tags:
+                    for idx, (line_words, line_tags) in enumerate(zip(f_words, f_tags)):
+                        # print(idx)
+                        self.sentence_num += 1
+                        yield parse_fn(line_words, line_tags, idx)
+            def count_sentences(self, words, tags):
+                count = 0
+                with Path(words).open('r') as f_words, Path(tags).open('r') as f_tags:
+                    for idx, (line_words, line_tags) in enumerate(zip(f_words, f_tags)): 
+                        # print(idx)
+                        count += 1 
+                return count
         
-
         shapes = (([None], [None, None], [None], []), # words, chars, char_lengths, sentence index
                   [None])                         # tags              
 
         types = ((tf.string, tf.string, tf.int32, tf.int32),
                  tf.string)
+        
+        gen = generator_wrapper()
 
         dataset = tf.data.Dataset.from_generator(
             functools.partial(
-                generator_fn,
+                gen.generator_fn,
                 filenames[0],
-                filenames[1]
+                filenames[1],
             ),
             output_shapes=shapes,
             output_types=types
         )
+        # print(f'TOTAL = {gen.count_sentences(filenames[0], filenames[1])}')
+        # print(f'TOTAL = {gen.sentence_num}')
+        # print(f'filenames = {filenames}')
 
         dataset = dataset.shuffle(params.buffer_size)
         dataset = dataset.repeat() # ??? how much times
@@ -145,7 +160,7 @@ def get_training_input(filenames, params):
                 "source_length": tf.shape(src[0]),
                 "target_length": tf.shape(tgt),
                 "char_length": src[2],
-                "idx": src[3],
+                "sentence_idx": src[3],
             },
             num_parallel_calls=params.num_threads
         )
@@ -190,7 +205,7 @@ def get_training_input(filenames, params):
         # Removes dimensions of size 1 from the shape of a tensor
         features["source_length"] = tf.squeeze(features["source_length"], 1)
         features["target_length"] = tf.squeeze(features["target_length"], 1)
-        # features["idx"] = 
+        features["total_sentence_num"] = tf.constant(gen.count_sentences(filenames[0], filenames[1]))
 
         return features
 

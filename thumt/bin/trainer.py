@@ -35,8 +35,8 @@ def parse_args(args=None):
                         help="Path to saved models")
     parser.add_argument("--vocabulary", type=str, nargs=3,
                         help="Path of source and target vocabulary")
-    parser.add_argument("--validation", type=str,
-                        help="Path of validation file")
+    parser.add_argument("--validation", type=str, nargs=2,
+                        help="Path of validation source and target corpus")
     parser.add_argument("--references", type=str, nargs="+",
                         help="Path of reference files")
 
@@ -94,7 +94,7 @@ def default_parameters():
         decode_length=0,
         decode_constant=5.0,
         decode_normalize=False,
-        validation="",
+        validation=["", ""],
         references=[""],
         save_checkpoint_secs=0,
         save_checkpoint_steps=1000,
@@ -322,26 +322,33 @@ def main(args):
         if not params.record:
             # Build input queue
             if params.use_bert and params.bert_emb_path:
-                features = dataset.get_training_input_with_bert(params.input + [params.bert_emb_path], params)
+                training_features = dataset.get_training_input_with_bert(params.input + [params.bert_emb_path], params)
             else:
-                features = dataset.get_training_input(params.input, params)
+                training_features = dataset.get_training_input(params.input, params)
+                validation_features = dataset.get_training_input(params.validation, params)
         else:
-            features = record.get_input_features(  # ??? 
+            training_features = record.get_input_features(  # ??? 
                 os.path.join(params.record, "*train*"), "train", params
             )
-        # print(f'features = {features["idx"]}')
-        # Build model
+
         initializer = get_initializer(params)
         print(f'params to model_cls = {params}')
         model = model_cls(params)
 
         # Multi-GPU setting
-        sharded_losses = parallel.parallel_model(
+        training_sharded_losses = parallel.parallel_model(
             model.get_training_func(initializer),
-            features,
+            training_features,
             params.device_list
         )
-        loss = tf.add_n(sharded_losses) / len(sharded_losses)
+        train_loss = tf.add_n(training_sharded_losses) / len(training_sharded_losses)
+
+        validation_sharded_losses = parallel.parallel_model(
+            model.get_validation_func(initializer),
+            validation_features,
+            params.device_list
+        )
+        val_loss = tf.add_n(validation_sharded_losses) / len(validation_sharded_losses)
 
         # Create global step
         global_step = tf.train.get_or_create_global_step()
@@ -370,20 +377,73 @@ def main(args):
                                      epsilon=params.adam_epsilon)
 
         if params.update_cycle == 1:
+            train_var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/global_emb") + \
+                            tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/decoder") + \
+                            tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/maxout") + \
+                            tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/sequence_labeling") + \
+                            tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/softmax")
+            val_var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "rnnsearch/ignoring")
             train_op = tf.contrib.layers.optimize_loss(
                 name="training",
-                loss=loss,
+                loss=train_loss,
                 global_step=global_step,
                 learning_rate=learning_rate,
                 clip_gradients=params.clip_grad_norm or None,
                 optimizer=opt,
-                colocate_gradients_with_ops=True
+                colocate_gradients_with_ops=True,
+                variables=train_var_list
             )
+            
+            EPSILON = 0.1
+            del_val_w = [item for item in opt.compute_gradients(val_loss, colocate_gradients_with_ops=True) \
+                            if item[1] in train_var_list]
+            def add_to_gradients(grads_and_vars, alpha):
+                # print(grads_and_vars)
+                for grad, var in grads_and_vars:
+                    # print(f'grad = {grad}')
+                    # print(f'var = {var}')
+                    # print(type(grad))
+                    # print(isinstance(grad, tf.IndexedSlices))
+                    if grad is None:
+                        continue
+                    elif isinstance(grad, tf.IndexedSlices):
+                        # print(f'inter diff = {alpha * grad.values}')
+                        var.assign(tf.scatter_add(var, grad.indices, alpha * grad.values))
+                    else:
+                        # print(f'inter diff = {alpha * grad}')
+                        var.assign_add(alpha * grad)
+                    # print(f'new var = {var}')
+                    # print()
+            # [item[1].assign_add(EPSILON * item[0]) for item in del_val_w if item[0] is not None]
+            add_to_gradients(del_val_w, EPSILON)
+            del_train_v_plus = [item for item in opt.compute_gradients(train_loss, colocate_gradients_with_ops=True) \
+                            if item[1] in val_var_list]
+
+            # [item[1].assign_sub(2.0 * EPSILON * item[0]) for item in del_val_w if item[0] is not None]
+            add_to_gradients(del_val_w, -2.0 * EPSILON)
+            del_train_v_minus = [item for item in opt.compute_gradients(train_loss, colocate_gradients_with_ops=True) \
+                            if item[1] in val_var_list]
+
+            val_grads_and_vars = [(-1.0 * (tf.convert_to_tensor(iplus[0]) - tf.convert_to_tensor(iminus[0])) / (2.0 * EPSILON), iplus[1]) for iplus, iminus in zip(del_train_v_plus, del_train_v_minus)]
+            gradients = [item[0] for item in val_grads_and_vars]
+            variables = [item[1] for item in val_grads_and_vars]
+
+            # Gradient clipping avoid greadient explosion!!
+            if isinstance(params.clip_grad_norm or None, float):
+                gradients, _ = tf.clip_by_global_norm(gradients,
+                                                      params.clip_grad_norm)
+
+            # Update variables
+            val_grads_and_vars = list(zip(gradients, variables))
+            val_op = opt.apply_gradients(val_grads_and_vars, global_step)
+            # [item[1].assign_add(EPSILON * item[0]) for item in del_val_w]
+            add_to_gradients(del_val_w, EPSILON)
+
             zero_op = tf.no_op("zero_op")
             collect_op = tf.no_op("collect_op")
         else:
             grads_and_vars = opt.compute_gradients(
-                loss, colocate_gradients_with_ops=True)
+                train_loss, colocate_gradients_with_ops=True)
             gradients = [item[0] for item in grads_and_vars]
             variables = [item[1] for item in grads_and_vars]
             variables = utils.replicate_variables(variables)
@@ -416,14 +476,16 @@ def main(args):
         # Add hooks
         train_hooks = [
             tf.train.StopAtStepHook(last_step=params.train_steps),
-            tf.train.NanTensorHook(loss),  # Monitors the loss tensor and stops training if loss is NaN
+            tf.train.NanTensorHook(train_loss),  # Monitors the loss tensor and stops training if loss is NaN
             tf.train.LoggingTensorHook(
                 {
                     "step": global_step,
-                    "loss": loss,
-                    "chars": tf.shape(features["chars"]),
-                    "source": tf.shape(features["source"]),
-                    #"bert": tf.shape(features["bert"]),
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "chars": tf.shape(training_features["chars"]),
+                    "source": tf.shape(training_features["source"]),
+                    # "A": val_var_list[0],
+                    #"bert": tf.shape(training_features["bert"]),
                     "lr": learning_rate
                 },
                 every_n_iter=1
@@ -460,12 +522,20 @@ def main(args):
         with tf.train.MonitoredTrainingSession(
                 checkpoint_dir=params.output, hooks=train_hooks,
                 save_checkpoint_secs=None, config=config) as sess:
-            print(sess.run(features))
+            dummy = tf.get_variable('rnnsearch/global_emb/source_embedding/bias:0')
+            print(f'\n\n\nDEBUG DETAILS:\n\n')
+            print(sess.run(dummy))
+            sess.run(dummy.assign_add(dummy))
+            print(sess.run(dummy))
+            # print('training_features target shape =', sess.run(training_features)['target'].shape)
+            # print('validation_features target shape =', sess.run(validation_features)['target'].shape)
             while not sess.should_stop():
                 utils.session_run(sess, zero_op)
                 for i in range(1, params.update_cycle):
                     utils.session_run(sess, collect_op)
+                sess.run(val_op)
                 sess.run(train_op)
+
 
 
 if __name__ == "__main__":
